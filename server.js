@@ -16,6 +16,7 @@ const {
   MERCHANT_NO,
   DEVICE_TYPE = "CHILD_MACHINE",
   MERCHANT_PRIVATE_KEY_B64,
+  CALLBACK_VERIFY,
 } = process.env;
 
 if (!BASE_URL || !MERCHANT_NO || !MERCHANT_PRIVATE_KEY_B64) {
@@ -29,6 +30,47 @@ const PEM_PRIVATE =
   "-----BEGIN PRIVATE KEY-----\n" +
   MERCHANT_PRIVATE_KEY_B64.match(/.{1,64}/g).join("\n") +
   "\n-----END PRIVATE KEY-----";
+
+const VENDOR_PUBLIC_KEY_B64 = process.env.VENDOR_PUBLIC_KEY_B64;
+
+const VENDOR_PUBLIC_PEM =
+  "-----BEGIN PUBLIC KEY-----\n" +
+  VENDOR_PUBLIC_KEY_B64.match(/.{1,64}/g).join("\n") +
+  "\n-----END PUBLIC KEY-----";
+
+function stableStringify(obj) {
+  const sort = (x) => {
+    if (Array.isArray(x)) return x.map(sort);
+    if (x && typeof x === "object") {
+      return Object.keys(x)
+        .sort()
+        .reduce((acc, k) => {
+          const v = x[k];
+          if (v !== null && v !== undefined) acc[k] = sort(v);
+          return acc;
+        }, {});
+    }
+    return x;
+  };
+  return JSON.stringify(sort(obj));
+}
+
+// Try verifying the signature over `originalData` (most likely), falling back to whole body if needed.
+function verifyVendorCallbackSignature({ merchantNo, sign, originalData }) {
+  const candidates = [
+    stableStringify(originalData), // common pattern
+    stableStringify({ merchantNo, originalData }), // fallback pattern
+  ];
+  for (const s of candidates) {
+    const v = crypto.createVerify("RSA-SHA256");
+    v.update(s);
+    v.end();
+    if (v.verify(VENDOR_PUBLIC_PEM, Buffer.from(sign, "base64"))) {
+      return true;
+    }
+  }
+  return false;
+}
 
 function sortObject(obj) {
   if (Array.isArray(obj)) return obj.map(sortObject);
@@ -64,6 +106,47 @@ async function postSigned(path, value) {
     timeout: 20000,
   });
   return res.data;
+}
+
+/* ------------------------ Orders in the Memmory ------------------------ */
+
+const orders = new Map(); // key: cartNo, value: { deviceNo, cartIndex, siteNo, startAt, endAt, status, electricity }
+
+// call this when you unlock (after mock payment succeeds)
+function openOrder({ deviceNo, cartNo, cartIndex, siteNo }) {
+  if (!cartNo) return; // we key by cartNo; if you only know index, you can map by (deviceNo,index) instead
+  orders.set(cartNo, {
+    deviceNo,
+    cartNo,
+    cartIndex,
+    siteNo,
+    startAt: Date.now(),
+    endAt: null,
+    status: "in_use",
+  });
+}
+
+// call this in the callback
+function closeOrderOnReturn({ cartNo, cartIndex, electricity, deviceNo }) {
+  const o = cartNo ? orders.get(cartNo) : null;
+  if (o && o.status === "in_use") {
+    o.endAt = Date.now();
+    o.status = "returned";
+    o.electricity = electricity;
+    o.returnDeviceNo = deviceNo;
+    orders.set(cartNo, o);
+  } else {
+    // no open order found: still create a terminal record for reconciliation
+    orders.set(cartNo || `unknown_${Date.now()}`, {
+      deviceNo,
+      cartNo,
+      cartIndex,
+      startAt: null,
+      endAt: Date.now(),
+      status: "returned",
+      electricity,
+    });
+  }
 }
 
 /* ------------------------ API FACADES USED BY UI ------------------------ */
@@ -383,7 +466,7 @@ app.post("/api/handcart/unlock", async (req, res) => {
       cartNo: String(cartNo).trim(),
       cartIndex: cartIndexNum,
     };
-
+    openOrder({ deviceNo, cartNo, cartIndex, siteNo: "S001585" });
     console.log("[SERVER unlock] payload->vendor:", value);
     const data = await postSigned("/trx/interface/handCart/unlock", value);
     console.log("[SERVER unlock] vendor response:", data);
@@ -435,17 +518,43 @@ app.post("/api/handcart/unbind", async (req, res) => {
 });
 
 // 5) Return callback (还车回调) — vendor -> your server
-// Doc: You provide this URL; vendor sends:
+// we provide this URL; vendor sends:
 // { merchantNo, sign, originalData: { cartNo, cartIndex, electricity, deviceNo } }
-app.post("/api/handcart/callback", (req, res) => {
+app.post("/api/handcart/callback", async (req, res) => {
   try {
-    console.log("[HANDCART CALLBACK]", JSON.stringify(req.body, null, 2));
-    // TODO (optional): verify sign, update order status, persist to DB, etc.
-    // MUST return "success" to stop their retries:
-    res.json({ code: 200, msg: "success" });
+    const { merchantNo, sign, originalData } = req.body || {};
+    if (!merchantNo || !sign || !originalData) {
+      return res.status(400).type("text/plain").send("bad request");
+    }
+    if (CALLBACK_VERIFY === "true") {
+      const ok = verifyVendorCallbackSignature({
+        merchantNo,
+        sign,
+        originalData,
+      });
+      if (!ok) {
+        return res.status(401).type("text/plain").send("invalid sign");
+      }
+    }
+    // Process the return
+    closeOrderOnReturn(originalData);
+
+    // IMPORTANT: reply exactly the text "success"
+    return res.json({ code: "00000", msg: "success" });
   } catch (e) {
-    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+    console.error("[HANDCART CALLBACK] error:", e);
+    // Do not send "success" on error; they will retry
+    res.status(500).type("text/plain").send("error");
   }
+});
+app.get("/api/orders/open", (req, res) => {
+  res.json([...orders.values()].filter((o) => o.status === "in_use"));
+});
+app.get("/api/orders/recent", (req, res) => {
+  const list = [...orders.values()]
+    .sort((a, b) => (b.endAt || 0) - (a.endAt || 0))
+    .slice(0, 50);
+  res.json(list);
 });
 
 app.listen(PORT, () =>
