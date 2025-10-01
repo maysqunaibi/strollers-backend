@@ -332,6 +332,122 @@ app.post("/api/site/remove", async (req, res) => {
   }
 });
 
+/* =========================
+   HANDCART (strollers) API
+   ========================= */
+
+// 1) Get cart list (车辆列表)
+// Doc: POST /trx/interface/handCart/getCartList
+// value: { merchantNo, deviceNo }
+app.post("/api/handcart/list", async (req, res) => {
+  try {
+    const { deviceNo } = req.body;
+    const data = await postSigned("/trx/interface/handCart/getCartList", {
+      merchantNo: MERCHANT_NO,
+      deviceNo,
+    });
+    res.json(data);
+  } catch (e) {
+    res
+      .status(500)
+      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+// 2) Unlock cart (车辆解锁)
+// Doc: POST /trx/interface/handCart/unlock
+// value: { merchantNo, deviceNo, cartIndex(int) }
+app.post("/api/handcart/unlock", async (req, res) => {
+  try {
+    const { deviceNo, cartIndex, cartNo } = req.body || {};
+    const cartIndexNum = Number(cartIndex);
+
+    if (!deviceNo)
+      return res.json({ code: "20001", msg: "deviceNo 不能为空", data: null });
+    if (!cartNo)
+      return res.json({
+        code: "20001",
+        msg: "value.cartNo 不能为空",
+        data: null,
+      });
+    if (!Number.isInteger(cartIndexNum)) {
+      return res.json({
+        code: "20001",
+        msg: "value.cartIndex 不能为空",
+        data: null,
+      });
+    }
+
+    const value = {
+      merchantNo: MERCHANT_NO,
+      deviceNo,
+      cartNo: String(cartNo).trim(),
+      cartIndex: cartIndexNum,
+    };
+
+    console.log("[SERVER unlock] payload->vendor:", value);
+    const data = await postSigned("/trx/interface/handCart/unlock", value);
+    console.log("[SERVER unlock] vendor response:", data);
+    res.json(data);
+  } catch (e) {
+    res
+      .status(500)
+      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// 3) Bind carts (绑定车辆) — one-time association to merchant
+// Doc: POST /trx/interface/handCart/bind
+// value: { merchantNo, cartNo: [ "IC卡号", ... ] }
+app.post("/api/handcart/bind", async (req, res) => {
+  try {
+    const { cartNo } = req.body; // array of IC numbers
+    const list = Array.isArray(cartNo) ? cartNo : [cartNo].filter(Boolean);
+    console.log("[SERVER bind] incoming cartNo:", cartNo, "normalized:", list);
+    const data = await postSigned("/trx/interface/handCart/bind", {
+      merchantNo: MERCHANT_NO,
+      cartNo: list,
+    });
+    console.log("[SERVER bind] vendor response:", data);
+    res.json(data);
+  } catch (e) {
+    res
+      .status(500)
+      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// 4) Unbind carts (解绑车辆)
+// Doc: POST /trx/interface/handCart/unbind
+// value: { merchantNo, cartNo: [ "IC卡号", ... ] }
+app.post("/api/handcart/unbind", async (req, res) => {
+  try {
+    const { cartNo } = req.body; // array of IC numbers
+    const data = await postSigned("/trx/interface/handCart/unbind", {
+      merchantNo: MERCHANT_NO,
+      cartNo: Array.isArray(cartNo) ? cartNo : [cartNo].filter(Boolean),
+    });
+    res.json(data);
+  } catch (e) {
+    res
+      .status(500)
+      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// 5) Return callback (还车回调) — vendor -> your server
+// Doc: You provide this URL; vendor sends:
+// { merchantNo, sign, originalData: { cartNo, cartIndex, electricity, deviceNo } }
+app.post("/api/handcart/callback", (req, res) => {
+  try {
+    console.log("[HANDCART CALLBACK]", JSON.stringify(req.body, null, 2));
+    // TODO (optional): verify sign, update order status, persist to DB, etc.
+    // MUST return "success" to stop their retries:
+    res.json({ code: 200, msg: "success" });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
 app.listen(PORT, () =>
   console.log(`MVP server running: http://localhost:${PORT}`)
 );
