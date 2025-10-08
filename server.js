@@ -557,6 +557,61 @@ app.get("/api/orders/recent", (req, res) => {
   res.json(list);
 });
 
+const axiosBase = require("axios");
+const MOYASAR_SECRET_KEY = process.env.MOYASAR_SECRET_KEY;
+
+async function moyasarFetchPayment(paymentId) {
+  const url = `https://api.moyasar.com/v1/payments/${paymentId}`;
+  const auth = Buffer.from(`${MOYASAR_SECRET_KEY}:`).toString("base64"); // Basic with secret only
+  const res = await axiosBase.get(url, {
+    headers: { Authorization: `Basic ${auth}` },
+    timeout: 15000,
+  });
+  return res.data;
+}
+// Confirm the payment with Moyasar, then unlock the cart
+app.post("/api/payments/confirm-and-unlock", async (req, res) => {
+  try {
+    const { paymentId, deviceNo, cartNo, cartIndex, siteNo, amountHalalas } =
+      req.body || {};
+    if (!paymentId || !deviceNo || !cartNo || typeof cartIndex !== "number") {
+      return res.status(400).json({ ok: false, msg: "Missing params" });
+    }
+
+    // 1) Fetch payment
+    const pay = await moyasarFetchPayment(paymentId);
+
+    // 2) Validate status & amount
+    const okStatus = pay?.status === "paid" || pay?.status === "authorized";
+    const okCurrency = pay?.currency?.toUpperCase() === "SAR";
+    const okAmount = Number(pay?.amount) === Number(amountHalalas);
+
+    if (!okStatus || !okCurrency || !okAmount) {
+      return res.status(400).json({
+        ok: false,
+        msg: `Invalid payment. status=${pay?.status} currency=${pay?.currency} amount=${pay?.amount}`,
+      });
+    }
+
+    // 3) Open local order record (so we can reconcile when callback arrives)
+    openOrder({ deviceNo, cartNo, cartIndex, siteNo: siteNo || null });
+
+    // 4) Call vendor unlock
+    // const unlockRes = await postSigned("/trx/interface/handCart/unlock", {
+    //   merchantNo: MERCHANT_NO,
+    //   deviceNo,
+    //   cartNo,
+    //   cartIndex,
+    // });
+
+    // Optional: refresh list later on the frontend
+    return res.json({ ok: unlockRes?.code === "00000", vendor: unlockRes });
+  } catch (e) {
+    console.error("[confirm-and-unlock] error", e?.response?.data || e.message);
+    return res.status(500).json({ ok: false, msg: "Server error" });
+  }
+});
+
 app.listen(PORT, () =>
   console.log(`MVP server running: http://localhost:${PORT}`)
 );
