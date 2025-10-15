@@ -4,6 +4,7 @@ const axios = require("axios");
 const cors = require("cors");
 const crypto = require("crypto");
 require("dotenv").config();
+const store = require("./db");
 
 const app = express();
 app.use(cors());
@@ -99,54 +100,12 @@ async function postSigned(path, value) {
   signer.update(jsonString);
   signer.end();
   const signature = signer.sign(PEM_PRIVATE, "base64");
-
   const url = `${BASE_URL}${path}`;
   const res = await axios.post(url, sorted, {
     headers: { "Content-Type": "application/json", Authorization: signature },
     timeout: 20000,
   });
   return res.data;
-}
-
-/* ------------------------ Orders in the Memmory ------------------------ */
-
-const orders = new Map(); // key: cartNo, value: { deviceNo, cartIndex, siteNo, startAt, endAt, status, electricity }
-
-// call this when you unlock (after mock payment succeeds)
-function openOrder({ deviceNo, cartNo, cartIndex, siteNo }) {
-  if (!cartNo) return; // we key by cartNo; if you only know index, you can map by (deviceNo,index) instead
-  orders.set(cartNo, {
-    deviceNo,
-    cartNo,
-    cartIndex,
-    siteNo,
-    startAt: Date.now(),
-    endAt: null,
-    status: "in_use",
-  });
-}
-
-// call this in the callback
-function closeOrderOnReturn({ cartNo, cartIndex, electricity, deviceNo }) {
-  const o = cartNo ? orders.get(cartNo) : null;
-  if (o && o.status === "in_use") {
-    o.endAt = Date.now();
-    o.status = "returned";
-    o.electricity = electricity;
-    o.returnDeviceNo = deviceNo;
-    orders.set(cartNo, o);
-  } else {
-    // no open order found: still create a terminal record for reconciliation
-    orders.set(cartNo || `unknown_${Date.now()}`, {
-      deviceNo,
-      cartNo,
-      cartIndex,
-      startAt: null,
-      endAt: Date.now(),
-      status: "returned",
-      electricity,
-    });
-  }
 }
 
 /* ------------------------ API FACADES USED BY UI ------------------------ */
@@ -169,82 +128,39 @@ app.get("/api/site/:siteNo/slots", async (req, res) => {
   }
 });
 
-// site meals (LAUNCH)
-app.get("/api/site/:siteNo/meals", async (req, res) => {
+// Local packages catalog (Model A - Mall). Optional site override.
+app.get("/api/catalog/packages", async (req, res) => {
   try {
-    const data = await postSigned("/trx/interface/setMeal/query", {
-      deviceType: DEVICE_TYPE,
-      merchantNo: MERCHANT_NO,
-      siteNo: req.params.siteNo,
-      siteOrderType: "LAUNCH",
-      type: "SITE",
-    });
-    res.json(data);
-  } catch (e) {
-    res
-      .status(500)
-      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
-  }
-});
+    const siteNo = req.query.siteNo || null;
+    const siteType = req.query.siteType || "SHOPPING_MALL";
+    const { prisma } = require("./db");
 
-// default meals (templates)
-app.get("/api/site/:siteNo/default-meals", async (req, res) => {
-  try {
-    const data = await postSigned("/trx/interface/setMeal/defaultMeal", {
-      deviceType: DEVICE_TYPE,
-      merchantNo: MERCHANT_NO,
-      siteNo: req.params.siteNo,
-      siteOrderType: "LAUNCH",
-      type: "SITE",
-    });
-    res.json(data);
-  } catch (e) {
-    res
-      .status(500)
-      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
-  }
-});
+    let rows = [];
+    if (siteNo) {
+      // 1) try site-specific
+      rows = await prisma.package.findMany({
+        where: { active: 1, site_no: siteNo },
+        orderBy: { display_order: "asc" },
+      });
+      // 2) fallback to defaults for that siteType
+      if (rows.length === 0) {
+        rows = await prisma.package.findMany({
+          where: { active: 1, site_type: siteType, site_no: null },
+          orderBy: { display_order: "asc" },
+        });
+      }
+    } else {
+      // 🔧 change here: when no siteNo, return ALL active packages (site-specific + defaults)
+      rows = await prisma.package.findMany({
+        where: { active: 1 },
+        orderBy: [{ site_no: "asc" }, { display_order: "asc" }],
+      });
+    }
 
-// save meal(s)
-app.post("/api/setMeal/save", async (req, res) => {
-  try {
-    const {
-      siteNo,
-      setMeals = [],
-      siteOrderType = "LAUNCH",
-      type = "SITE",
-    } = req.body;
-    const value = {
-      deviceType: DEVICE_TYPE,
-      merchantNo: MERCHANT_NO,
-      setMealList: setMeals.map((m) => ({
-        amount: m.amount,
-        amountType: "decimal",
-        amountUnit: "元",
-        coin: m.coin,
-        coinUnit: "币",
-        deviceType: DEVICE_TYPE,
-        merchantNo: MERCHANT_NO,
-        orders: String(m.coin), // convention; can be any sequence
-        setMealName: m.setMealName,
-        siteNo,
-        siteOrderType,
-        status: m.status || "ENABLE",
-        type,
-        whetherRecommend: 0,
-        whetherRecommendExt: 0,
-      })),
-      siteNo,
-      siteNoList: [siteNo],
-      siteOrderType,
-      type,
-    };
-    const data = await postSigned("/trx/interface/setMeal/save", value);
-    res.json(data);
+    res.json({ code: "00000", msg: "success", data: rows });
   } catch (e) {
-    res
-      .status(500)
-      .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
+    console.error("[catalog/packages] error:", e);
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
   }
 });
 
@@ -466,7 +382,6 @@ app.post("/api/handcart/unlock", async (req, res) => {
       cartNo: String(cartNo).trim(),
       cartIndex: cartIndexNum,
     };
-    openOrder({ deviceNo, cartNo, cartIndex, siteNo: "S001585" });
     console.log("[SERVER unlock] payload->vendor:", value);
     const data = await postSigned("/trx/interface/handCart/unlock", value);
     console.log("[SERVER unlock] vendor response:", data);
@@ -518,43 +433,179 @@ app.post("/api/handcart/unbind", async (req, res) => {
 });
 
 // 5) Return callback (还车回调) — vendor -> your server
-// we provide this URL; vendor sends:
-// { merchantNo, sign, originalData: { cartNo, cartIndex, electricity, deviceNo } }
+// Vendor sends: { merchantNo, sign, originalData: { cartNo, cartIndex, electricity, deviceNo } }
 app.post("/api/handcart/callback", async (req, res) => {
   try {
     const { merchantNo, sign, originalData } = req.body || {};
     if (!merchantNo || !sign || !originalData) {
       return res.status(400).type("text/plain").send("bad request");
     }
+
+    // Optional signature verification (keep behavior the vendor expects)
     if (CALLBACK_VERIFY === "true") {
       const ok = verifyVendorCallbackSignature({
         merchantNo,
         sign,
         originalData,
       });
-      if (!ok) {
-        return res.status(401).type("text/plain").send("invalid sign");
-      }
+      if (!ok) return res.status(401).type("text/plain").send("invalid sign");
     }
-    // Process the return
-    closeOrderOnReturn(originalData);
 
-    // IMPORTANT: reply exactly the text "success"
-    return res.json({ code: "00000", msg: "success" });
+    // Persist return in DB
+    const { deviceNo, cartNo, cartIndex, electricity } = originalData || {};
+    const result = await store.closeOrderOnReturnFromVendor({
+      merchantNo,
+      deviceNo,
+      cartNo,
+      cartIndex,
+      electricity,
+    });
+    console.log("[HANDCART CALLBACK] DB result:", result);
+
+    // IMPORTANT: Reply exactly 'success' (plain text) so vendor stops retries
+    return res.type("text/plain").send("success");
   } catch (e) {
-    console.error("[HANDCART CALLBACK] error:", e);
-    // Do not send "success" on error; they will retry
-    res.status(500).type("text/plain").send("error");
+    console.error("[HANDCART CALLBACK] error:", e?.response?.data || e.message);
+    // Do not send "success" on error; they will retry up to 3 times
+    return res.status(500).type("text/plain").send("error");
   }
 });
-app.get("/api/orders/open", (req, res) => {
-  res.json([...orders.values()].filter((o) => o.status === "in_use"));
+
+/****************************************ORDERS AND PAYMENTS ENDPOINTS *******************************************/
+// List orders (optionally filter by status, search by cartNo/paymentId)
+app.get("/api/orders/list", async (req, res) => {
+  try {
+    const limit = Math.min(Number(req.query.limit) || 50, 200);
+
+    const rows = await store.prisma.rentalOrder.findMany({
+      include: { payment: true },
+      orderBy: { created_at: "desc" },
+      take: limit,
+    });
+
+    console.log("[ORDERS] list ->", rows.length);
+    return res.json({ code: "00000", msg: "success", data: rows });
+  } catch (e) {
+    console.error("[ORDERS] list error:", e.message);
+    return res.status(500).json({ code: "LOCAL_ERROR", msg: "Server error" });
+  }
 });
-app.get("/api/orders/recent", (req, res) => {
-  const list = [...orders.values()]
-    .sort((a, b) => (b.endAt || 0) - (a.endAt || 0))
-    .slice(0, 50);
-  res.json(list);
+app.get("/api/orders", async (req, res) => {
+  try {
+    const { status, q, limit = 50 } = req.query;
+    const where = {};
+    if (status) where.status = status;
+    if (q) {
+      // simple OR search (cart_no or payment_id or device_no)
+      where.OR = [
+        { cart_no: { contains: q } },
+        { payment_id: { contains: q } },
+        { device_no: { contains: q } },
+      ];
+    }
+    const rows = await store.prisma.rentalOrder.findMany({
+      where,
+      orderBy: { created_at: "desc" },
+      take: Number(limit),
+      include: { payment: true },
+    });
+    res.json({ code: "00000", msg: "success", data: rows });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Active orders (in_use)
+app.get("/api/orders/active", async (req, res) => {
+  try {
+    const rows = await store.prisma.rentalOrder.findMany({
+      where: { status: "in_use" },
+      orderBy: { unlock_confirmed_at: "desc" },
+      include: { payment: true },
+    });
+    res.json({ code: "00000", msg: "success", data: rows });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Order detail
+app.get("/api/orders/:id", async (req, res) => {
+  try {
+    const row = await store.prisma.rentalOrder.findUnique({
+      where: { id: req.params.id },
+      include: { payment: true },
+    });
+    if (!row) return res.status(404).json({ code: "404", msg: "Not found" });
+    res.json({ code: "00000", msg: "success", data: row });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Admin: mark returned (manual close in case callback missed)
+// body: { note?: string }
+app.post("/api/orders/:id/mark-returned", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const note = req.body?.note || null;
+    const updated = await store.updateOrderStatus(id, {
+      status: "returned",
+      returned_at: new Date(),
+      notes: note,
+    });
+    res.json({ code: "00000", msg: "success", data: updated });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Admin: cancel (only allowed if pending_payment)
+app.post("/api/orders/:id/cancel", async (req, res) => {
+  try {
+    const id = req.params.id;
+    const order = await store.prisma.rentalOrder.findUnique({ where: { id } });
+    if (!order) return res.status(404).json({ code: "404", msg: "Not found" });
+    if (order.status !== "pending_payment") {
+      return res
+        .status(400)
+        .json({ code: "400", msg: "Only pending_payment can be canceled" });
+    }
+    const updated = await store.updateOrderStatus(id, { status: "canceled" });
+    res.json({ code: "00000", msg: "success", data: updated });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Payments list (optionally filter by status)
+app.get("/api/payments", async (req, res) => {
+  try {
+    const { status, limit = 50 } = req.query;
+    const where = {};
+    if (status) where.status = status;
+    const rows = await store.prisma.payment.findMany({
+      where,
+      orderBy: { created_at: "desc" },
+      take: Number(limit),
+    });
+    res.json({ code: "00000", msg: "success", data: rows });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
+});
+
+// Payment detail
+app.get("/api/payments/:id", async (req, res) => {
+  try {
+    const row = await store.prisma.payment.findUnique({
+      where: { id: req.params.id },
+    });
+    if (!row) return res.status(404).json({ code: "404", msg: "Not found" });
+    res.json({ code: "00000", msg: "success", data: row });
+  } catch (e) {
+    res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
+  }
 });
 
 const axiosBase = require("axios");
@@ -569,46 +620,102 @@ async function moyasarFetchPayment(paymentId) {
   });
   return res.data;
 }
+/***********************************************ORDERS WITH DATABASE ***************************************/
 // Confirm the payment with Moyasar, then unlock the cart
 app.post("/api/payments/confirm-and-unlock", async (req, res) => {
   try {
-    const { paymentId, deviceNo, cartNo, cartIndex, siteNo, amountHalalas } =
+    console.log("[CONFIRM] req.body:", req.body);
+
+    let { paymentId, deviceNo, cartNo, cartIndex, siteNo, amountHalalas } =
       req.body || {};
-    if (!paymentId || !deviceNo || !cartNo || typeof cartIndex !== "number") {
-      return res.status(400).json({ ok: false, msg: "Missing params" });
+    cartIndex = Number(cartIndex);
+    amountHalalas = Number(amountHalalas);
+
+    if (!paymentId || !deviceNo || !cartNo || !Number.isFinite(cartIndex)) {
+      console.warn("[CONFIRM] missing params:", {
+        paymentId,
+        deviceNo,
+        cartNo,
+        cartIndex,
+      });
+      return res.status(400).json({
+        code: "400",
+        msg: "Missing params: paymentId, deviceNo, cartNo, cartIndex",
+      });
     }
 
     // 1) Fetch payment
     const pay = await moyasarFetchPayment(paymentId);
+    console.log("[CONFIRM] moyasar pay:", JSON.stringify(pay));
 
     // 2) Validate status & amount
     const okStatus = pay?.status === "paid" || pay?.status === "authorized";
-    const okCurrency = pay?.currency?.toUpperCase() === "SAR";
-    const okAmount = Number(pay?.amount) === Number(amountHalalas);
+    const okCurrency = (pay?.currency || "").toUpperCase() === "SAR";
+    const okAmount = Number(pay?.amount) === amountHalalas;
+
+    console.log("[CONFIRM] checks:", {
+      okStatus,
+      okCurrency,
+      okAmount,
+      want: amountHalalas,
+    });
 
     if (!okStatus || !okCurrency || !okAmount) {
       return res.status(400).json({
-        ok: false,
-        msg: `Invalid payment. status=${pay?.status} currency=${pay?.currency} amount=${pay?.amount}`,
+        code: "PAY_INVALID",
+        msg: `Invalid payment: status=${pay?.status}, currency=${pay?.currency}, amount=${pay?.amount}`,
       });
     }
 
-    // 3) Open local order record (so we can reconcile when callback arrives)
-    openOrder({ deviceNo, cartNo, cartIndex, siteNo: siteNo || null });
+    // 3) Upsert payment in DB
+    const paymentRow = await store.upsertPaymentFromMoyasar(pay);
 
-    // 4) Call vendor unlock
-    // const unlockRes = await postSigned("/trx/interface/handCart/unlock", {
-    //   merchantNo: MERCHANT_NO,
-    //   deviceNo,
-    //   cartNo,
-    //   cartIndex,
-    // });
+    // 4) Create/reuse order in "unlocking"
+    const order = await store.openOrderForPayment({
+      paymentId: paymentRow.id,
+      siteNo: siteNo || null,
+      merchantNo: MERCHANT_NO,
+      deviceNo,
+      cartNo,
+      cartIndex,
+      amountHalalas,
+    });
 
-    // Optional: refresh list later on the frontend
-    return res.json({ ok: unlockRes?.code === "00000", vendor: unlockRes });
+    // 5) Call vendor unlock
+    console.log("[CONFIRM] calling vendor unlock:", {
+      deviceNo,
+      cartNo,
+      cartIndex,
+    });
+    const unlockRes = await postSigned("/trx/interface/handCart/unlock", {
+      merchantNo: MERCHANT_NO,
+      deviceNo,
+      cartNo,
+      cartIndex,
+    });
+    console.log("[CONFIRM] vendor unlock response:", unlockRes);
+
+    // 6) Update order status
+    if (unlockRes?.code === "00000") {
+      await store.updateOrderStatus(order.id, {
+        status: "in_use",
+        unlock_confirmed_at: new Date(),
+      });
+    } else {
+      await store.updateOrderStatus(order.id, {
+        status: "unlock_failed",
+        notes: `[vendor] code=${unlockRes?.code} msg=${unlockRes?.msg || ""}`,
+      });
+    }
+
+    return res.json({
+      code: "00000",
+      msg: "success",
+      data: { orderId: order.id, payment: paymentRow, vendor: unlockRes },
+    });
   } catch (e) {
-    console.error("[confirm-and-unlock] error", e?.response?.data || e.message);
-    return res.status(500).json({ ok: false, msg: "Server error" });
+    console.error("[CONFIRM] error:", e?.response?.data || e.message);
+    return res.status(500).json({ code: "LOCAL_ERROR", msg: "Server error" });
   }
 });
 

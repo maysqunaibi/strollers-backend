@@ -1,0 +1,67 @@
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+generator client {
+  provider = "prisma-client-js"
+}
+
+model Payment {
+  id             String   @id
+  mode           String
+  status         String
+  amount_halalas Int
+  currency       String
+  scheme         String?
+  customer_ref   String?
+  metadata_json  String?
+  created_at     DateTime @default(now())
+
+  orders         RentalOrder[]
+}
+
+model RentalOrder {
+  id                  String   @id @default(uuid())
+  payment_id          String
+  merchant_no         String
+  site_no             String
+  device_no           String
+  cart_no             String?
+  cart_index          Int
+  set_meal_id         String?
+  amount_halalas      Int
+  status              String
+  unlock_requested_at DateTime?
+  unlock_confirmed_at DateTime?
+  return_device_no    String?
+  returned_at         DateTime?
+  electricity         Int?
+  deposit_halalas     Int?
+  refund_halalas      Int?
+  notes               String?
+  created_at          DateTime  @default(now())
+  updated_at          DateTime  @updatedAt
+
+  payment             Payment   @relation(fields: [payment_id], references: [id])
+
+  @@index([status])
+  @@index([cart_no])
+  @@unique([payment_id])
+}
+
+model Package {
+  id               Int      @id @default(autoincrement())
+  set_key          String
+  site_type        String
+  site_no          String?
+  name             String
+  amount_halalas   Int
+  duration_minutes Int
+  display_order    Int      @default(0)
+  recommended      Int      @default(0)
+  active           Int      @default(1)
+  created_at       DateTime @default(now())
+
+  @@index([site_type, site_no])
+  @@index([set_key, active])
+}
