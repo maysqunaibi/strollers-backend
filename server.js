@@ -432,42 +432,51 @@ app.post("/api/handcart/unbind", async (req, res) => {
   }
 });
 
-// 5) Return callback (还车回调) — vendor -> your server
-// Vendor sends: { merchantNo, sign, originalData: { cartNo, cartIndex, electricity, deviceNo } }
+// Return callback (还车回调) — vendor -> your server
+// Expected request JSON: { merchantNo, sign, originalData:{ cartNo, cartIndex, electricity, deviceNo } }
+// Expected success JSON response: { code:"00000", msg:"success" }
 app.post("/api/handcart/callback", async (req, res) => {
   try {
     const { merchantNo, sign, originalData } = req.body || {};
     if (!merchantNo || !sign || !originalData) {
-      return res.status(400).type("text/plain").send("bad request");
+      // respond JSON (not plain text) so vendor sees a structured error
+      return res.status(400).json({ code: "400", msg: "bad request" });
     }
 
-    // Optional signature verification (keep behavior the vendor expects)
+    // Optional signature check — keep it quick
     if (CALLBACK_VERIFY === "true") {
       const ok = verifyVendorCallbackSignature({
         merchantNo,
         sign,
         originalData,
       });
-      if (!ok) return res.status(401).type("text/plain").send("invalid sign");
+      if (!ok)
+        return res.status(401).json({ code: "401", msg: "invalid sign" });
     }
 
-    // Persist return in DB
-    const { deviceNo, cartNo, cartIndex, electricity } = originalData || {};
-    const result = await store.closeOrderOnReturnFromVendor({
-      merchantNo,
-      deviceNo,
-      cartNo,
-      cartIndex,
-      electricity,
-    });
-    console.log("[HANDCART CALLBACK] DB result:", result);
+    // ✅ Respond immediately so vendor does not time out
+    res.status(200).json({ code: "00000", msg: "success" });
 
-    // IMPORTANT: Reply exactly 'success' (plain text) so vendor stops retries
-    return res.type("text/plain").send("success");
+    // 🔧 Process in background (won’t block the response)
+    setImmediate(async () => {
+      try {
+        const { deviceNo, cartNo, cartIndex, electricity } = originalData || {};
+        const result = await store.closeOrderOnReturnFromVendor({
+          merchantNo,
+          deviceNo,
+          cartNo,
+          cartIndex,
+          electricity,
+        });
+        console.log("[HANDCART CALLBACK] DB result:", result);
+      } catch (e) {
+        console.error("[HANDCART CALLBACK] background error:", e?.message || e);
+      }
+    });
   } catch (e) {
-    console.error("[HANDCART CALLBACK] error:", e?.response?.data || e.message);
-    // Do not send "success" on error; they will retry up to 3 times
-    return res.status(500).type("text/plain").send("error");
+    console.error("[HANDCART CALLBACK] handler error:", e?.message || e);
+    // still JSON on error
+    return res.status(500).json({ code: "500", msg: "error" });
   }
 });
 
