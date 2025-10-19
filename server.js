@@ -56,11 +56,11 @@ function stableStringify(obj) {
   return JSON.stringify(sort(obj));
 }
 
-// Try verifying the signature over `originalData` (most likely), falling back to whole body if needed.
+//this intended to be for callback verivication but not used currenty in testing 
 function verifyVendorCallbackSignature({ merchantNo, sign, originalData }) {
   const candidates = [
-    stableStringify(originalData), // common pattern
-    stableStringify({ merchantNo, originalData }), // fallback pattern
+    stableStringify(originalData), 
+    stableStringify({ merchantNo, originalData }),
   ];
   for (const s of candidates) {
     const v = crypto.createVerify("RSA-SHA256");
@@ -72,7 +72,7 @@ function verifyVendorCallbackSignature({ merchantNo, sign, originalData }) {
   }
   return false;
 }
-
+// data in any request body should be sorted (vendor instructions)
 function sortObject(obj) {
   if (Array.isArray(obj)) return obj.map(sortObject);
   if (obj && typeof obj === "object") {
@@ -108,7 +108,7 @@ async function postSigned(path, value) {
   return res.data;
 }
 
-/* ------------------------ API FACADES USED BY UI ------------------------ */
+/* ------------------------ API USED BY UI ------------------------ */
 
 // slots at a site
 app.get("/api/site/:siteNo/slots", async (req, res) => {
@@ -128,7 +128,7 @@ app.get("/api/site/:siteNo/slots", async (req, res) => {
   }
 });
 
-// Local packages catalog (Model A - Mall). Optional site override.
+// Local packages catalog. Optional site override.
 app.get("/api/catalog/packages", async (req, res) => {
   try {
     const siteNo = req.query.siteNo || null;
@@ -150,7 +150,7 @@ app.get("/api/catalog/packages", async (req, res) => {
         });
       }
     } else {
-      // 🔧 change here: when no siteNo, return ALL active packages (site-specific + defaults)
+      //  when no siteNo, return ALL active packages (site-specific + defaults)
       rows = await prisma.package.findMany({
         where: { active: 1 },
         orderBy: [{ site_no: "asc" }, { display_order: "asc" }],
@@ -159,7 +159,7 @@ app.get("/api/catalog/packages", async (req, res) => {
 
     res.json({ code: "00000", msg: "success", data: rows });
   } catch (e) {
-    console.error("[catalog/packages] error:", e);
+    console.error("[packages] error:", e);
     res.status(500).json({ code: "LOCAL_ERROR", msg: e.message });
   }
 });
@@ -335,9 +335,8 @@ app.post("/api/site/remove", async (req, res) => {
    HANDCART (strollers) API
    ========================= */
 
-// 1) Get cart list (车辆列表)
-// Doc: POST /trx/interface/handCart/getCartList
-// value: { merchantNo, deviceNo }
+// 1) Get cart list 
+
 app.post("/api/handcart/list", async (req, res) => {
   try {
     const { deviceNo } = req.body;
@@ -352,26 +351,24 @@ app.post("/api/handcart/list", async (req, res) => {
       .json(e?.response?.data || { code: "LOCAL_ERROR", msg: e.message });
   }
 });
-// 2) Unlock cart (车辆解锁)
-// Doc: POST /trx/interface/handCart/unlock
-// value: { merchantNo, deviceNo, cartIndex(int) }
+// 2) Unlock cart 
 app.post("/api/handcart/unlock", async (req, res) => {
   try {
     const { deviceNo, cartIndex, cartNo } = req.body || {};
     const cartIndexNum = Number(cartIndex);
 
     if (!deviceNo)
-      return res.json({ code: "20001", msg: "deviceNo 不能为空", data: null });
+      return res.json({ code: "20001", msg: "deviceNo", data: null });
     if (!cartNo)
       return res.json({
         code: "20001",
-        msg: "value.cartNo 不能为空",
+        msg: "value.cartNo",
         data: null,
       });
     if (!Number.isInteger(cartIndexNum)) {
       return res.json({
         code: "20001",
-        msg: "value.cartIndex 不能为空",
+        msg: "value.cartIndex",
         data: null,
       });
     }
@@ -393,9 +390,8 @@ app.post("/api/handcart/unlock", async (req, res) => {
   }
 });
 
-// 3) Bind carts (绑定车辆) — one-time association to merchant
-// Doc: POST /trx/interface/handCart/bind
-// value: { merchantNo, cartNo: [ "IC卡号", ... ] }
+// 3) Bind carts one-time association to merchant
+
 app.post("/api/handcart/bind", async (req, res) => {
   try {
     const { cartNo } = req.body; // array of IC numbers
@@ -414,9 +410,7 @@ app.post("/api/handcart/bind", async (req, res) => {
   }
 });
 
-// 4) Unbind carts (解绑车辆)
-// Doc: POST /trx/interface/handCart/unbind
-// value: { merchantNo, cartNo: [ "IC卡号", ... ] }
+// 4) Unbind carts 
 app.post("/api/handcart/unbind", async (req, res) => {
   try {
     const { cartNo } = req.body; // array of IC numbers
@@ -432,18 +426,18 @@ app.post("/api/handcart/unbind", async (req, res) => {
   }
 });
 
-// Return callback (还车回调) — vendor -> your server
+// Return callback 
 // Expected request JSON: { merchantNo, sign, originalData:{ cartNo, cartIndex, electricity, deviceNo } }
 // Expected success JSON response: { code:"00000", msg:"success" }
 app.post("/api/handcart/callback", async (req, res) => {
   try {
     const { merchantNo, sign, originalData } = req.body || {};
     if (!merchantNo || !sign || !originalData) {
-      // respond JSON (not plain text) so vendor sees a structured error
+      
       return res.status(400).json({ code: "400", msg: "bad request" });
     }
 
-    // Optional signature check — keep it quick
+    // THis is for signature check — not used now in tsting
     if (CALLBACK_VERIFY === "true") {
       const ok = verifyVendorCallbackSignature({
         merchantNo,
@@ -454,10 +448,10 @@ app.post("/api/handcart/callback", async (req, res) => {
         return res.status(401).json({ code: "401", msg: "invalid sign" });
     }
 
-    // ✅ Respond immediately so vendor does not time out
+    
     res.status(200).json({ code: "00000", msg: "success" });
 
-    // 🔧 Process in background (won’t block the response)
+    
     setImmediate(async () => {
       try {
         const { deviceNo, cartNo, cartIndex, electricity } = originalData || {};
@@ -475,7 +469,7 @@ app.post("/api/handcart/callback", async (req, res) => {
     });
   } catch (e) {
     console.error("[HANDCART CALLBACK] handler error:", e?.message || e);
-    // still JSON on error
+    
     return res.status(500).json({ code: "500", msg: "error" });
   }
 });
@@ -505,7 +499,6 @@ app.get("/api/orders", async (req, res) => {
     const where = {};
     if (status) where.status = status;
     if (q) {
-      // simple OR search (cart_no or payment_id or device_no)
       where.OR = [
         { cart_no: { contains: q } },
         { payment_id: { contains: q } },
@@ -553,7 +546,6 @@ app.get("/api/orders/:id", async (req, res) => {
 });
 
 // Admin: mark returned (manual close in case callback missed)
-// body: { note?: string }
 app.post("/api/orders/:id/mark-returned", async (req, res) => {
   try {
     const id = req.params.id;

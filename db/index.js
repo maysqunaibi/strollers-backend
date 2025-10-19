@@ -1,7 +1,6 @@
 const { PrismaClient } = require("@prisma/client");
 const prisma = new PrismaClient();
 exports.prisma = prisma;
-// Create or update a payment row from Moyasar API response
 exports.upsertPaymentFromMoyasar = async function upsertPaymentFromMoyasar(
   pay
 ) {
@@ -16,20 +15,18 @@ exports.upsertPaymentFromMoyasar = async function upsertPaymentFromMoyasar(
     pay?.currency
   );
 
-  // normalize fields
   const id = String(pay.id);
-  const status = String(pay.status || "").toLowerCase(); // paid, authorized, failed, etc.
+  const status = String(pay.status || "").toLowerCase(); // paid, authorized, failed.
   const mode =
     (pay.source && pay.source.type) ||
     pay.source?.company ||
     pay.method ||
     null; // depends on Moyasar object
-  const scheme = pay.source?.scheme || null; // e.g., mada/visa/applepay
+  const scheme = pay.source?.scheme || null; 
   const amount_halalas = Number(pay.amount || 0);
   const currency = (pay.currency || "SAR").toUpperCase();
   const metadata_json = JSON.stringify(pay);
 
-  // idempotent upsert by payment id
   const row = await prisma.payment.upsert({
     where: { id },
     create: {
@@ -54,7 +51,7 @@ exports.upsertPaymentFromMoyasar = async function upsertPaymentFromMoyasar(
   return row;
 };
 
-// Create/open a rental order tied to a payment (idempotent on payment_id)
+// Create/open a rental order tied to a payment
 exports.openOrderForPayment = async function openOrderForPayment({
   paymentId,
   siteNo,
@@ -64,7 +61,7 @@ exports.openOrderForPayment = async function openOrderForPayment({
   amountHalalas,
   merchantNo,
 }) {
-  // If an order already exists for this payment, just return it
+  // If an order already exists for this payment, return it
   console.log(
     "[DB] openOrderForPayment paymentId:",
     paymentId,
@@ -86,10 +83,9 @@ exports.openOrderForPayment = async function openOrderForPayment({
     return existing;
   }
   try {
-    // Create new order in pending_payment (or unlocking—see below)
     const order = await prisma.rentalOrder.create({
       data: {
-        status: "unlocking", // we’re past payment confirmation here
+        status: "unlocking", 
         site_no: siteNo || null,
         device_no: deviceNo,
         cart_no: cartNo,
@@ -112,7 +108,6 @@ exports.openOrderForPayment = async function openOrderForPayment({
   }
 };
 
-// Minimal status update helper (if you don’t already have one)
 module.exports.updateOrderStatus = async function updateOrderStatus(id, patch) {
   console.log("[DB] updateOrderStatus:", id, patch);
   const row = await prisma.rentalOrder.update({
@@ -200,7 +195,7 @@ module.exports.closeOrderOnReturnFromVendor =
     deviceNo,
     cartNo,
     cartIndex,
-    electricity, // may be number or string
+    electricity, 
   }) {
     console.log("[DB] closeOrderOnReturnFromVendor input:", {
       merchantNo,
@@ -210,7 +205,6 @@ module.exports.closeOrderOnReturnFromVendor =
       electricity,
     });
 
-    // normalize values
     const cartIndexNum = Number(cartIndex);
     const elecNum = electricity == null ? null : Number(electricity);
 
@@ -244,7 +238,6 @@ module.exports.closeOrderOnReturnFromVendor =
       console.warn(
         "[DB] No in_use order found for return. Creating audit log row."
       );
-      // Optional: store a lightweight audit record or just return.
       return { updated: 0, note: "no_active_order" };
     }
 
